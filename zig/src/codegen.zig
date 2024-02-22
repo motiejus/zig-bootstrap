@@ -20,7 +20,7 @@ const Module = @import("Module.zig");
 const Target = std.Target;
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
-const Value = @import("value.zig").Value;
+const Value = @import("Value.zig");
 const Zir = @import("Zir.zig");
 const Alignment = InternPool.Alignment;
 
@@ -119,6 +119,7 @@ pub fn generateLazySymbol(
 
     const comp = bin_file.comp;
     const zcu = comp.module.?;
+    const ip = &zcu.intern_pool;
     const target = comp.root_mod.resolved_target.result;
     const endian = target.cpu.arch.endian();
     const gpa = comp.gpa;
@@ -151,8 +152,9 @@ pub fn generateLazySymbol(
         return Result.ok;
     } else if (lazy_sym.ty.zigTypeTag(zcu) == .Enum) {
         alignment.* = .@"1";
-        for (lazy_sym.ty.enumFields(zcu)) |tag_name_ip| {
-            const tag_name = zcu.intern_pool.stringToSlice(tag_name_ip);
+        const tag_names = lazy_sym.ty.enumFields(zcu);
+        for (0..tag_names.len) |tag_index| {
+            const tag_name = zcu.intern_pool.stringToSlice(tag_names.get(ip)[tag_index]);
             try code.ensureUnusedCapacity(tag_name.len + 1);
             code.appendSliceAssumeCapacity(tag_name);
             code.appendAssumeCapacity(0);
@@ -322,24 +324,24 @@ pub fn generateSymbol(
             },
             .f128 => |f128_val| writeFloat(f128, f128_val, target, endian, try code.addManyAsArray(16)),
         },
-        .ptr => |ptr| {
-            // generate ptr
-            switch (try lowerParentPtr(bin_file, src_loc, switch (ptr.len) {
-                .none => typed_value.val,
-                else => typed_value.val.slicePtr(mod),
-            }.toIntern(), code, debug_output, reloc_info)) {
+        .ptr => switch (try lowerParentPtr(bin_file, src_loc, typed_value.val.toIntern(), code, debug_output, reloc_info)) {
+            .ok => {},
+            .fail => |em| return .{ .fail = em },
+        },
+        .slice => |slice| {
+            switch (try generateSymbol(bin_file, src_loc, .{
+                .ty = typed_value.ty.slicePtrFieldType(mod),
+                .val = Value.fromInterned(slice.ptr),
+            }, code, debug_output, reloc_info)) {
                 .ok => {},
                 .fail => |em| return .{ .fail = em },
             }
-            if (ptr.len != .none) {
-                // generate len
-                switch (try generateSymbol(bin_file, src_loc, .{
-                    .ty = Type.usize,
-                    .val = Value.fromInterned(ptr.len),
-                }, code, debug_output, reloc_info)) {
-                    .ok => {},
-                    .fail => |em| return Result{ .fail = em },
-                }
+            switch (try generateSymbol(bin_file, src_loc, .{
+                .ty = Type.usize,
+                .val = Value.fromInterned(slice.len),
+            }, code, debug_output, reloc_info)) {
+                .ok => {},
+                .fail => |em| return .{ .fail = em },
             }
         },
         .opt => {
@@ -676,7 +678,6 @@ fn lowerParentPtr(
 ) CodeGenError!Result {
     const mod = bin_file.comp.module.?;
     const ptr = mod.intern_pool.indexToKey(parent_ptr).ptr;
-    assert(ptr.len == .none);
     return switch (ptr.addr) {
         .decl => |decl| try lowerDeclRef(bin_file, src_loc, decl, code, debug_output, reloc_info),
         .mut_decl => |md| try lowerDeclRef(bin_file, src_loc, md.decl, code, debug_output, reloc_info),
@@ -985,19 +986,21 @@ fn genDeclRef(
         return GenResult.mcv(.{ .load_symbol = sym.esym_index });
     } else if (lf.cast(link.File.MachO)) |macho_file| {
         if (is_extern) {
-            // TODO make this part of getGlobalSymbol
             const name = zcu.intern_pool.stringToSlice(decl.name);
-            const sym_name = try std.fmt.allocPrint(gpa, "_{s}", .{name});
-            defer gpa.free(sym_name);
-            const global_index = try macho_file.addUndefined(sym_name, .{ .add_got = true });
-            return GenResult.mcv(.{ .load_got = link.File.MachO.global_symbol_bit | global_index });
+            const lib_name = if (decl.getOwnedVariable(zcu)) |ov|
+                zcu.intern_pool.stringToSliceUnwrap(ov.lib_name)
+            else
+                null;
+            const sym_index = try macho_file.getGlobalSymbol(name, lib_name);
+            macho_file.getSymbol(macho_file.getZigObject().?.symbols.items[sym_index]).flags.needs_got = true;
+            return GenResult.mcv(.{ .load_symbol = sym_index });
         }
-        const atom_index = try macho_file.getOrCreateAtomForDecl(decl_index);
-        const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
+        const sym_index = try macho_file.getZigObject().?.getOrCreateMetadataForDecl(macho_file, decl_index);
+        const sym = macho_file.getSymbol(sym_index);
         if (is_threadlocal) {
-            return GenResult.mcv(.{ .load_tlv = sym_index });
+            return GenResult.mcv(.{ .load_tlv = sym.nlist_idx });
         }
-        return GenResult.mcv(.{ .load_got = sym_index });
+        return GenResult.mcv(.{ .load_symbol = sym.nlist_idx });
     } else if (lf.cast(link.File.Coff)) |coff_file| {
         if (is_extern) {
             const name = zcu.intern_pool.stringToSlice(decl.name);
@@ -1041,7 +1044,12 @@ fn genUnnamedConst(
             const local = elf_file.symbol(local_sym_index);
             return GenResult.mcv(.{ .load_symbol = local.esym_index });
         },
-        .macho, .coff => {
+        .macho => {
+            const macho_file = lf.cast(link.File.MachO).?;
+            const local = macho_file.getSymbol(local_sym_index);
+            return GenResult.mcv(.{ .load_symbol = local.nlist_idx });
+        },
+        .coff => {
             return GenResult.mcv(.{ .load_direct = local_sym_index });
         },
         .plan9 => {

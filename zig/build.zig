@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const docgen_cmd = b.addRunArtifact(docgen_exe);
-    docgen_cmd.addArgs(&.{ "--zig", b.zig_exe });
+    docgen_cmd.addArgs(&.{ "--zig", b.graph.zig_exe });
     if (b.zig_lib_dir) |p| {
         docgen_cmd.addArg("--zig-lib-dir");
         docgen_cmd.addDirectoryArg(p);
@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) !void {
                 "rfc1951.txt",
                 "rfc1952.txt",
                 "rfc8478.txt",
-                // exclude files from lib/std/compress/deflate/testdata
+                // exclude files from lib/std/compress/flate/testdata
                 ".expect",
                 ".expect-noinput",
                 ".golden",
@@ -165,6 +165,8 @@ pub fn build(b: *std.Build) !void {
                 ".xz",
                 // exclude files from lib/std/tz/
                 ".tzif",
+                // exclude files from lib/std/tar/testdata
+                ".tar",
                 // others
                 "README.md",
             },
@@ -469,6 +471,7 @@ pub fn build(b: *std.Build) !void {
         .name = "behavior",
         .desc = "Run the behavior tests",
         .optimize_modes = optimization_modes,
+        .include_paths = &.{},
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
         .skip_cross_glibc = skip_cross_glibc,
@@ -478,10 +481,24 @@ pub fn build(b: *std.Build) !void {
 
     test_step.dependOn(tests.addModuleTests(b, .{
         .test_filter = test_filter,
+        .root_src = "test/c_import.zig",
+        .name = "c-import",
+        .desc = "Run the @cImport tests",
+        .optimize_modes = optimization_modes,
+        .include_paths = &.{"test/c_import"},
+        .skip_single_threaded = true,
+        .skip_non_native = skip_non_native,
+        .skip_cross_glibc = skip_cross_glibc,
+        .skip_libc = skip_libc,
+    }));
+
+    test_step.dependOn(tests.addModuleTests(b, .{
+        .test_filter = test_filter,
         .root_src = "lib/compiler_rt.zig",
         .name = "compiler-rt",
         .desc = "Run the compiler_rt tests",
         .optimize_modes = optimization_modes,
+        .include_paths = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
         .skip_cross_glibc = skip_cross_glibc,
@@ -494,6 +511,7 @@ pub fn build(b: *std.Build) !void {
         .name = "universal-libc",
         .desc = "Run the universal libc tests",
         .optimize_modes = optimization_modes,
+        .include_paths = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
         .skip_cross_glibc = skip_cross_glibc,
@@ -525,6 +543,7 @@ pub fn build(b: *std.Build) !void {
         .name = "std",
         .desc = "Run the standard library tests",
         .optimize_modes = optimization_modes,
+        .include_paths = &.{},
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
         .skip_cross_glibc = skip_cross_glibc,
@@ -537,6 +556,24 @@ pub fn build(b: *std.Build) !void {
 
     b.step("fmt", "Modify source files in place to have conforming formatting")
         .dependOn(&do_fmt.step);
+
+    const update_mingw_step = b.step("update-mingw", "Update zig's bundled mingw");
+    const opt_mingw_src_path = b.option([]const u8, "mingw-src", "path to mingw-w64 source directory");
+    const update_mingw_exe = b.addExecutable(.{
+        .name = "update_mingw",
+        .target = b.host,
+        .root_source_file = .{ .path = "tools/update_mingw.zig" },
+    });
+    const update_mingw_run = b.addRunArtifact(update_mingw_exe);
+    update_mingw_run.addDirectoryArg(.{ .path = "lib" });
+    if (opt_mingw_src_path) |mingw_src_path| {
+        update_mingw_run.addDirectoryArg(.{ .cwd_relative = mingw_src_path });
+    } else {
+        // Intentionally cause an error if this build step is requested.
+        update_mingw_run.addArg("--missing-mingw-source-directory");
+    }
+
+    update_mingw_step.dependOn(&update_mingw_run.step);
 }
 
 fn addWasiUpdateStep(b: *std.Build, version: [:0]const u8) !void {
@@ -791,10 +828,14 @@ fn addCxxKnownPath(
     if (!std.process.can_spawn)
         return error.RequiredLibraryNotFound;
 
-    const path_padded = if (ctx.cxx_compiler_arg1.len > 0)
-        b.run(&.{ ctx.cxx_compiler, ctx.cxx_compiler_arg1, b.fmt("-print-file-name={s}", .{objname}) })
-    else
-        b.run(&.{ ctx.cxx_compiler, b.fmt("-print-file-name={s}", .{objname}) });
+    const path_padded = run: {
+        var args = std.ArrayList([]const u8).init(b.allocator);
+        try args.append(ctx.cxx_compiler);
+        var it = std.mem.tokenizeAny(u8, ctx.cxx_compiler_arg1, &std.ascii.whitespace);
+        while (it.next()) |arg| try args.append(arg);
+        try args.append(b.fmt("-print-file-name={s}", .{objname}));
+        break :run b.run(args.items);
+    };
     var tokenizer = mem.tokenizeAny(u8, path_padded, "\r\n");
     const path_unpadded = tokenizer.next().?;
     if (mem.eql(u8, path_unpadded, objname)) {
@@ -864,7 +905,7 @@ fn findConfigH(b: *std.Build, config_h_path_option: ?[]const u8) ?[]const u8 {
         }
     }
 
-    var check_dir = fs.path.dirname(b.zig_exe).?;
+    var check_dir = fs.path.dirname(b.graph.zig_exe).?;
     while (true) {
         var dir = fs.cwd().openDir(check_dir, .{}) catch unreachable;
         defer dir.close();

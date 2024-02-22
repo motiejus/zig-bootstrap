@@ -750,26 +750,39 @@ pub fn addLinkTests(
     const omit_symlinks = builtin.os.tag == .windows and !enable_symlinks_windows;
 
     inline for (link.cases) |case| {
-        const requires_stage2 = @hasDecl(case.import, "requires_stage2") and
-            case.import.requires_stage2;
-        const requires_symlinks = @hasDecl(case.import, "requires_symlinks") and
-            case.import.requires_symlinks;
-        const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
-            case.import.requires_macos_sdk;
-        const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
-            case.import.requires_ios_sdk;
-        const bad =
-            (requires_stage2 and omit_stage2) or
-            (requires_symlinks and omit_symlinks) or
-            (requires_macos_sdk and !enable_macos_sdk) or
-            (requires_ios_sdk and !enable_ios_sdk);
-        if (!bad) {
-            const dep = b.anonymousDependency(case.build_root, case.import, .{});
+        if (mem.eql(u8, @typeName(case.import), "test.link.link")) {
+            const dep = b.anonymousDependency(case.build_root, case.import, .{
+                .has_macos_sdk = enable_macos_sdk,
+                .has_ios_sdk = enable_ios_sdk,
+                .has_symlinks_windows = !omit_symlinks,
+            });
             const dep_step = dep.builder.default_step;
             assert(mem.startsWith(u8, dep.builder.dep_prefix, "test."));
             const dep_prefix_adjusted = dep.builder.dep_prefix["test.".len..];
             dep_step.name = b.fmt("{s}{s}", .{ dep_prefix_adjusted, dep_step.name });
             step.dependOn(dep_step);
+        } else {
+            const requires_stage2 = @hasDecl(case.import, "requires_stage2") and
+                case.import.requires_stage2;
+            const requires_symlinks = @hasDecl(case.import, "requires_symlinks") and
+                case.import.requires_symlinks;
+            const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
+                case.import.requires_macos_sdk;
+            const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
+                case.import.requires_ios_sdk;
+            const bad =
+                (requires_stage2 and omit_stage2) or
+                (requires_symlinks and omit_symlinks) or
+                (requires_macos_sdk and !enable_macos_sdk) or
+                (requires_ios_sdk and !enable_ios_sdk);
+            if (!bad) {
+                const dep = b.anonymousDependency(case.build_root, case.import, .{});
+                const dep_step = dep.builder.default_step;
+                assert(mem.startsWith(u8, dep.builder.dep_prefix, "test."));
+                const dep_prefix_adjusted = dep.builder.dep_prefix["test.".len..];
+                dep_step.name = b.fmt("{s}{s}", .{ dep_prefix_adjusted, dep_step.name });
+                step.dependOn(dep_step);
+            }
         }
     }
 
@@ -783,7 +796,7 @@ pub fn addCliTests(b: *std.Build) *Step {
     {
         // Test `zig init`.
         const tmp_path = b.makeTempPath();
-        const init_exe = b.addSystemCommand(&.{ b.zig_exe, "init" });
+        const init_exe = b.addSystemCommand(&.{ b.graph.zig_exe, "init" });
         init_exe.setCwd(.{ .cwd_relative = tmp_path });
         init_exe.setName("zig init");
         init_exe.expectStdOutEqual("");
@@ -797,20 +810,20 @@ pub fn addCliTests(b: *std.Build) *Step {
         const bad_out_arg = "-femit-bin=does" ++ s ++ "not" ++ s ++ "exist" ++ s ++ "foo.exe";
         const ok_src_arg = "src" ++ s ++ "main.zig";
         const expected = "error: unable to open output directory 'does" ++ s ++ "not" ++ s ++ "exist': FileNotFound\n";
-        const run_bad = b.addSystemCommand(&.{ b.zig_exe, "build-exe", ok_src_arg, bad_out_arg });
+        const run_bad = b.addSystemCommand(&.{ b.graph.zig_exe, "build-exe", ok_src_arg, bad_out_arg });
         run_bad.setName("zig build-exe error message for bad -femit-bin arg");
         run_bad.expectExitCode(1);
         run_bad.expectStdErrEqual(expected);
         run_bad.expectStdOutEqual("");
         run_bad.step.dependOn(&init_exe.step);
 
-        const run_test = b.addSystemCommand(&.{ b.zig_exe, "build", "test" });
+        const run_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test" });
         run_test.setCwd(.{ .cwd_relative = tmp_path });
         run_test.setName("zig build test");
         run_test.expectStdOutEqual("");
         run_test.step.dependOn(&init_exe.step);
 
-        const run_run = b.addSystemCommand(&.{ b.zig_exe, "build", "run" });
+        const run_run = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "run" });
         run_run.setCwd(.{ .cwd_relative = tmp_path });
         run_run.setName("zig build run");
         run_run.expectStdOutEqual("Run `zig build test` to run the tests.\n");
@@ -844,7 +857,7 @@ pub fn addCliTests(b: *std.Build) *Step {
 
         // This is intended to be the exact CLI usage used by godbolt.org.
         const run = b.addSystemCommand(&.{
-            b.zig_exe,       "build-obj",
+            b.graph.zig_exe, "build-obj",
             "--cache-dir",   tmp_path,
             "--name",        "example",
             "-fno-emit-bin", "-fno-emit-h",
@@ -887,7 +900,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         subdir.writeFile("fmt3.zig", unformatted_code) catch @panic("unhandled");
 
         // Test zig fmt affecting only the appropriate files.
-        const run1 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "fmt1.zig" });
+        const run1 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "fmt1.zig" });
         run1.setName("run zig fmt one file");
         run1.setCwd(.{ .cwd_relative = tmp_path });
         run1.has_side_effects = true;
@@ -895,7 +908,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         run1.expectStdOutEqual("fmt1.zig\n");
 
         // Test excluding files and directories from a run
-        const run2 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "subdir", "." });
+        const run2 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "subdir", "." });
         run2.setName("run zig fmt on directory with exclusions");
         run2.setCwd(.{ .cwd_relative = tmp_path });
         run2.has_side_effects = true;
@@ -903,7 +916,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         run2.step.dependOn(&run1.step);
 
         // Test excluding non-existent file
-        const run3 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "nonexistent.zig", "." });
+        const run3 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "nonexistent.zig", "." });
         run3.setName("run zig fmt on directory with non-existent exclusion");
         run3.setCwd(.{ .cwd_relative = tmp_path });
         run3.has_side_effects = true;
@@ -911,7 +924,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         run3.step.dependOn(&run2.step);
 
         // running it on the dir, only the new file should be changed
-        const run4 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "." });
+        const run4 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run4.setName("run zig fmt the directory");
         run4.setCwd(.{ .cwd_relative = tmp_path });
         run4.has_side_effects = true;
@@ -919,7 +932,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         run4.step.dependOn(&run3.step);
 
         // both files have been formatted, nothing should change now
-        const run5 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "." });
+        const run5 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run5.setName("run zig fmt with nothing to do");
         run5.setCwd(.{ .cwd_relative = tmp_path });
         run5.has_side_effects = true;
@@ -933,7 +946,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         write6.step.dependOn(&run5.step);
 
         // Test `zig fmt` handling UTF-16 decoding.
-        const run6 = b.addSystemCommand(&.{ b.zig_exe, "fmt", "." });
+        const run6 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run6.setName("run zig fmt convert UTF-16 to UTF-8");
         run6.setCwd(.{ .cwd_relative = tmp_path });
         run6.has_side_effects = true;
@@ -1024,6 +1037,7 @@ const ModuleTestOptions = struct {
     name: []const u8,
     desc: []const u8,
     optimize_modes: []const OptimizeMode,
+    include_paths: []const []const u8,
     skip_single_threaded: bool,
     skip_non_native: bool,
     skip_cross_glibc: bool,
@@ -1127,7 +1141,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         const use_lld = if (test_target.use_lld == false) "-no-lld" else "";
         const use_pic = if (test_target.pic == true) "-pic" else "";
 
-        these_tests.addIncludePath(.{ .path = "test" });
+        for (options.include_paths) |include_path| these_tests.addIncludePath(.{ .path = include_path });
 
         if (target.os.tag == .wasi) {
             // WASI's default stack size can be too small for some big tests.

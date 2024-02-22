@@ -562,7 +562,7 @@ pub fn lowerToBuildSteps(
         run.setName(incr_case.base_path);
         run.addArgs(&.{
             case_base_path_with_dir,
-            b.zig_exe,
+            b.graph.zig_exe,
         });
         run.expectStdOutEqual("");
         parent_step.dependOn(&run.step);
@@ -653,7 +653,7 @@ pub fn lowerToBuildSteps(
                         break :no_exec;
                     }
                     const run_c = b.addSystemCommand(&.{
-                        b.zig_exe,
+                        b.graph.zig_exe,
                         "run",
                         "-cflags",
                         "-Ilib",
@@ -702,7 +702,7 @@ pub fn lowerToBuildSteps(
             const file_source = write_src.add("tmp.c", case.input);
 
             const translate_c = b.addTranslateC(.{
-                .source_file = file_source,
+                .root_source_file = file_source,
                 .optimize = .Debug,
                 .target = case.target,
                 .link_libc = case.link_libc,
@@ -729,7 +729,7 @@ pub fn lowerToBuildSteps(
             const file_source = write_src.add("tmp.c", case.input);
 
             const translate_c = b.addTranslateC(.{
-                .source_file = file_source,
+                .root_source_file = file_source,
                 .optimize = .Debug,
                 .target = case.target,
                 .link_libc = case.link_libc,
@@ -1207,8 +1207,8 @@ const WaitGroup = std.Thread.WaitGroup;
 const build_options = @import("build_options");
 const Package = @import("../../src/Package.zig");
 
-pub const std_options = struct {
-    pub const log_level: std.log.Level = .err;
+pub const std_options = .{
+    .log_level = .err,
 };
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
@@ -1797,7 +1797,7 @@ fn runOneCase(
                     try comp.makeBinFileExecutable();
 
                     while (true) {
-                        break :x std.ChildProcess.exec(.{
+                        break :x std.ChildProcess.run(.{
                             .allocator = allocator,
                             .argv = argv.items,
                             .cwd_dir = tmp.dir,
